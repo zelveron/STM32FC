@@ -1,0 +1,13 @@
+{
+  "name": "bmp5",
+  "version": "1.0.0",
+  "description": "Bosch BMP581 sensor API (vendored)",
+  "license": "BSD-3-Clause",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src",
+    "srcFilter": ["+<*.c>", "+<*.h>"]
+  }
+}
