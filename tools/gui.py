@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Live monitor for the STM32F407 BMP581 + BMI323 streamer.
+Live monitor for the STM32F407 BMP581 + BMI323 + uBlox streamer.
 
 Reads tagged CSV over USB CDC and shows:
   - BMI323 connection status
   - BMP581: pressure / temperature / altitude
   - BMI323: accel (g) and gyro (deg/s)
+  - Attitude: roll / pitch / yaw (complementary filter) + artificial horizon
+  - uBlox GNSS: position / altitude / satellites / fix
 
 Usage:
     python3 tools/gui.py                 # auto-detect port
@@ -14,6 +16,7 @@ Usage:
 
 import argparse
 import glob
+import math
 import os
 import queue
 import sys
@@ -42,8 +45,8 @@ class MonitorApp:
         self.port = port
         self.q = queue.Queue()
         self._last_data = time.time()
-        root.title("BMI323 + BMP581 Monitor")
-        root.geometry("480x360")
+        root.title("BMI323 + BMP581 + GNSS Monitor")
+        root.geometry("500x800")
         root.configure(bg="#1e1e1e")
 
         bg = "#1e1e1e"
@@ -85,6 +88,41 @@ class MonitorApp:
         self._row(bmi_frame, "Accel", self.acc_var)
         self._row(bmi_frame, "Gyro", self.gyr_var)
 
+        # --- GPS section ---
+        gps_frame = ttk.LabelFrame(root, text="uBlox GNSS (NMEA)")
+        gps_frame.pack(fill="x", padx=16, pady=6)
+
+        self.pos_var = tk.StringVar(value="--, --")
+        self.gps_alt_var = tk.StringVar(value="-- m")
+        self.sats_var = tk.StringVar(value="--")
+        self.fix_var = tk.StringVar(value="--")
+
+        self._row(gps_frame, "Position", self.pos_var)
+        self._row(gps_frame, "GPS Altitude", self.gps_alt_var)
+        self._row(gps_frame, "Satellites", self.sats_var)
+        self._row(gps_frame, "Fix", self.fix_var)
+
+        # --- Attitude section ---
+        att_frame = ttk.LabelFrame(root, text="Attitude (complementary filter)")
+        att_frame.pack(fill="x", padx=16, pady=6)
+
+        self.roll_var = tk.StringVar(value="-- °")
+        self.pitch_var = tk.StringVar(value="-- °")
+        self.yaw_var = tk.StringVar(value="-- °")
+
+        self._row(att_frame, "Roll", self.roll_var)
+        self._row(att_frame, "Pitch", self.pitch_var)
+        self._row(att_frame, "Yaw", self.yaw_var)
+
+        self._roll_deg = 0.0
+        self._pitch_deg = 0.0
+        self._yaw_deg = 0.0
+
+        self.horizon = tk.Canvas(att_frame, width=240, height=150,
+                                 bg="#000000", highlightthickness=0)
+        self.horizon.pack(pady=6)
+        self._draw_horizon()
+
         # --- footer ---
         self.footer_var = tk.StringVar(value=f"connecting to {port} ...")
         ttk.Label(root, textvariable=self.footer_var, foreground="#888888").pack(side="bottom", pady=6)
@@ -103,6 +141,42 @@ class MonitorApp:
         frame.pack(fill="x", padx=8, pady=3)
         ttk.Label(frame, text=label, width=14, anchor="w").pack(side="left")
         ttk.Label(frame, textvariable=var, style="Value.TLabel", anchor="e").pack(side="right", fill="x", expand=True)
+
+    @staticmethod
+    def _fix_label(fix):
+        return {0: "No fix", 1: "GPS fix", 2: "DGPS", 4: "RTK fixed",
+                5: "RTK float", 6: "Dead reckoning"}.get(fix, f"fix {fix}")
+
+    def _draw_horizon(self):
+        c = self.horizon
+        c.delete("all")
+        w = int(c["width"]); h = int(c["height"])
+        cx, cy = w / 2.0, h / 2.0
+        roll = self._roll_deg
+        pitch = self._pitch_deg
+
+        # Pitch: positive = nose up -> horizon drops (more sky visible).
+        horizon_y = cy + pitch * 2.0   # pixels
+
+        # Roll: rotate the horizon line about the canvas centre.
+        rad = math.radians(roll)
+        cosr, sinr = math.cos(rad), math.sin(rad)
+        ext = w + h   # endpoints well outside the canvas
+
+        def rot(x, y):
+            dx, dy = x - cx, y - cy
+            return (cx + dx * cosr - dy * sinr, cy + dx * sinr + dy * cosr)
+
+        x0, y0 = rot(cx - ext, horizon_y)
+        x1, y1 = rot(cx + ext, horizon_y)
+
+        c.create_rectangle(0, 0, w, h, fill="#3b82f6", outline="")             # sky
+        c.create_polygon(x0, y0, x1, y1, w + ext, h + ext, -ext, h + ext,
+                         fill="#7a4b22", outline="")                            # ground
+        c.create_line(x0, y0, x1, y1, fill="#ffffff", width=2)                  # horizon
+        c.create_line(cx - 20, cy, cx + 20, cy, fill="#fbbf24", width=2)        # wings
+        c.create_line(cx, cy - 12, cx, cy + 12, fill="#fbbf24", width=2)        # nose/tail
+        c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, fill="#fbbf24", outline="")
 
     def _read_loop(self, port):
         """Reconnect-forever serial reader. Pushes (kind, payload) into the queue."""
@@ -173,6 +247,32 @@ class MonitorApp:
             self.acc_var.set(f"{vals[0]:+.4f}, {vals[1]:+.4f}, {vals[2]:+.4f} g")
             self.gyr_var.set(f"{vals[3]:+7.2f}, {vals[4]:+7.2f}, {vals[5]:+7.2f} dps")
 
+        elif tag == "ATT" and len(parts) == 4:
+            try:
+                self._roll_deg = float(parts[1])
+                self._pitch_deg = float(parts[2])
+                self._yaw_deg = float(parts[3])
+            except ValueError:
+                return
+            self.roll_var.set(f"{self._roll_deg:+.1f} °")
+            self.pitch_var.set(f"{self._pitch_deg:+.1f} °")
+            self.yaw_var.set(f"{self._yaw_deg:+.1f} °")
+            self._draw_horizon()
+
+        elif tag == "GPS" and len(parts) == 6:
+            try:
+                lat = float(parts[1])
+                lon = float(parts[2])
+                alt = float(parts[3])
+                sats = int(parts[4])
+                fix = int(parts[5])
+            except ValueError:
+                return
+            self.pos_var.set(f"{lat:.6f}, {lon:.6f}")
+            self.gps_alt_var.set(f"{alt:.1f} m")
+            self.sats_var.set(str(sats))
+            self.fix_var.set(self._fix_label(fix))
+
         elif tag == "BMI_STATUS" and len(parts) == 2:
             self._connected = (parts[1] == "1")
             if self._connected:
@@ -184,7 +284,7 @@ class MonitorApp:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BMI323 + BMP581 monitor GUI")
+    ap = argparse.ArgumentParser(description="BMI323 + BMP581 + GNSS monitor GUI")
     ap.add_argument("--port", "-p", default=None, help="serial port (default: auto-detect)")
     args = ap.parse_args()
 

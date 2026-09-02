@@ -1,0 +1,13 @@
+{
+  "name": "STM32SD",
+  "version": "1.5.0",
+  "description": "STM32duino SD card library over SDIO/SDMMC (vendored)",
+  "license": "GPL-3.0",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src",
+    "srcFilter": ["+<*.c>", "+<*.cpp>", "+<*.h>"]
+  }
+}

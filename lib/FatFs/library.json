@@ -1,0 +1,13 @@
+{
+  "name": "FatFs",
+  "version": "4.0.4",
+  "description": "ChaN FatFs filesystem (stm32duino, vendored)",
+  "license": "BSD-3-Clause",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src",
+    "srcFilter": ["+<*>"]
+  }
+}
