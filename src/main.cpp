@@ -232,6 +232,7 @@ static void als_debug_probe(void)
 }
 
 static bool als_present = false;
+static float mag_heading = 0.0f;
 
 static void als_begin(void)
 {
@@ -767,7 +768,7 @@ void setup(void)
         sd_file = SD.open(sd_log_name, FILE_WRITE);
         if (sd_file)
         {
-            sd_file.println(F("t_ms,ax,ay,az,gx,gy,gz,roll,pitch,yaw,press_hPa,temp_c,alt_m,gps_time,gps_sats,gps_speed_kmh"));
+            sd_file.println(F("t_ms,ax,ay,az,gx,gy,gz,roll,pitch,yaw,press_hPa,temp_c,alt_m,gps_time,gps_sats,gps_speed_kmh,als_heading"));
             sd_file.flush();
             SerialUSB.print(F("SD_STATUS,1,"));
             SerialUSB.println(sd_log_name);
@@ -1014,6 +1015,20 @@ void loop(void)
         if (als_get(&ax_, &ay_, &az_, &at_, raw))
         {
             float temp_c = 302.0f * ((float)at_ - 1708.0f) / 4096.0f;
+
+            /* Tilt-compensated magnetic heading (0-360 deg, magnetic north).
+               NXP AN4248 formula; raw counts are scale-invariant so no
+               sensitivity conversion is needed. Axis alignment + hard-iron
+               calibration not applied (see README). */
+            float roll  = att_roll  * DEG_TO_RAD;
+            float pitch = att_pitch * DEG_TO_RAD;
+            float sr = sinf(roll),  cr = cosf(roll);
+            float sp = sinf(pitch), cp = cosf(pitch);
+            float Xh = ax_ * cp + az_ * sp;
+            float Yh = ax_ * sr * sp + ay_ * cr - az_ * sr * cp;
+            mag_heading = atan2f(-Yh, Xh) * RAD_TO_DEG;
+            if (mag_heading < 0.0f) mag_heading += 360.0f;
+
             SerialUSB.print(F("ALS,"));
             SerialUSB.print(ax_);
             SerialUSB.print(',');
@@ -1021,7 +1036,9 @@ void loop(void)
             SerialUSB.print(',');
             SerialUSB.print(az_);
             SerialUSB.print(',');
-            SerialUSB.println(temp_c, 1);
+            SerialUSB.print(temp_c, 1);
+            SerialUSB.print(',');
+            SerialUSB.println(mag_heading, 1);
         }
     }
 
@@ -1066,7 +1083,8 @@ void loop(void)
         sd_file.print(g_alt, 2); sd_file.print(',');
         sd_file.print(gps_time_str); sd_file.print(',');
         sd_file.print(gps_sats); sd_file.print(',');
-        sd_file.println(gps_speed_kmh, 1);
+        sd_file.print(gps_speed_kmh, 1); sd_file.print(',');
+        sd_file.println(mag_heading, 1);
 
         static uint32_t last_sd_sync = 0;
         if ((millis() - last_sd_sync) >= 1000)

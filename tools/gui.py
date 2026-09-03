@@ -94,9 +94,11 @@ class MonitorApp:
 
         self.als_var = tk.StringVar(value="--, --, --")
         self.als_temp_var = tk.StringVar(value="-- °C")
+        self.als_hdg_var = tk.StringVar(value="-- °")
 
         self._row(als_frame, "Field X,Y,Z", self.als_var)
         self._row(als_frame, "Temp", self.als_temp_var)
+        self._row(als_frame, "Heading", self.als_hdg_var)
 
         # --- GPS section ---
         gps_frame = ttk.LabelFrame(root, text="uBlox GNSS (NMEA)")
@@ -261,14 +263,15 @@ class MonitorApp:
             self.acc_var.set(f"{vals[0]:+.4f}, {vals[1]:+.4f}, {vals[2]:+.4f} g")
             self.gyr_var.set(f"{vals[3]:+7.2f}, {vals[4]:+7.2f}, {vals[5]:+7.2f} dps")
 
-        elif tag == "ALS" and len(parts) == 5:
+        elif tag == "ALS" and len(parts) == 6:
             try:
                 x = int(parts[1]); y = int(parts[2]); z = int(parts[3])
-                t = float(parts[4])
+                t = float(parts[4]); hdg = float(parts[5])
             except ValueError:
                 return
             self.als_var.set(f"{x:+d}, {y:+d}, {z:+d}")
             self.als_temp_var.set(f"{t:.1f} °C")
+            self.als_hdg_var.set(f"{hdg:.1f} °")
 
         elif tag == "ATT" and len(parts) == 4:
             try:
