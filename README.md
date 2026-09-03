@@ -15,7 +15,7 @@ everything in a **tkinter GUI** on a Raspberry Pi 5.
 | BMI323  | SPI1 PA4=CS PA5=SCK PA6=MISO PA7=MOSI | ✅ working — **bit-bang SPI only** |
 | BMP581  | I2C1 PB6=SCL PB7=SDA, addr 0x47  | ✅ working (pressure/temp/alt)     |
 | uBlox GNSS | USART1 PA9=TX PA10=RX (NMEA) | ✅ working — NMEA at 9600 baud; **no fix yet indoors (0 sats)** |
-| ALS31300 (Hall) | I2C1 PB6/PB7, addr **0x7E** | ⚠️ ACKs address but NACKs all register writes — **hardware issue, not yet readable** |
+| ALS31300 (Hall) | software I2C PB8=SCL PB9=SDA, addr **0x60** | ✅ working (X/Y/Z + temp) — bit-bang I2C |
 
 ## Hardware pin map (verified)
 
@@ -30,7 +30,8 @@ everything in a **tkinter GUI** on a Raspberry Pi 5.
 | uBlox GNSS | TX (MCU)   | PA9       | USART1_TX (PA9 is **TX-only** on F407)  |
 | uBlox GNSS | RX (MCU)   | PA10      | USART1_RX (PA10 is **RX-only**)         |
 | uBlox GNSS | (no enable)| —         | module is always-on; **no enable pin**  |
-| ALS31300   | SCL/SDA    | PB6/PB7   | same I2C bus as BMP581, addr 0x7E       |
+| ALS31300   | SCL        | PB8       | software I2C (bit-bang), addr 0x60     |
+| ALS31300   | SDA        | PB9       | ADR0=ADR1=GND → address 96 (0x60)     |
 | SD card    | D0..D3, CK, CMD | PC8..PC12, PD2 | SDIO 4-bit (see SD section)      |
 | USB CDC    | D+/D-      | PA12/PA11 | native USB, `SerialUSB`                 |
 
@@ -140,12 +141,15 @@ have critical fixes (see Known issues) — do not regenerate them from upstream.
    `lib/STM32SD/src/bsp_sd.h` `SD_DATATIMEOUT` → 2000;
    `lib/STM32SD/src/bsp_sd.c` `SD_CLK_DIV` → 10U (4 MHz) and `SD_BUS_WIDE` → 1B.
    Also `lib/FatFs/` **must** include the `ffsystem/` folder or the build fails.
-3. **ALS31300** at 0x7E ACKs its address but **NACKs every register/data byte**
-   (Wire error 3). CAC unlock (0x35 ← 0x2C413534), op-mode 0x27 wake, and a
-   10 kHz slow clock all fail. The mainline Linux driver wakes it with a plain
-   0x27 write (no CAC), so a healthy chip should respond — this one is a
-   hardware/power/wiring problem, not firmware. Registers: 0x27 op mode
-   (bits[1:0] 0=active), 0x28/0x29 = 32-bit X/Y/Z/temp data.
+3. **ALS31300** lives on **PB8=SCL, PB9=SDA** (NOT PB6/PB7 — those are I2C1's
+   default pins used by the BMP581). PB8/PB9 are I2C1's *alternate* pins and
+   I2C1 is already taken, so the ALS uses **software bit-bang I2C**
+   (`als_i2c_*` in main.cpp). Address = **0x60 (96)** when ADR0=ADR1=GND.
+   Reads work at any time (no Customer Access unlock); wake = write 0x27
+   bits[1:0]=0. Data: 8-byte read of 0x28 → X=(b0<<4)|(b5&0x0F),
+   Y=(b1<<4)|((b6>>4)&0x0F), Z=(b2<<4)|(b6&0x0F), temp=((b3&0x3F)<<6)|(b7&0x3F);
+   temp_C=302*(raw-1708)/4096. The mysterious device at 0x7E on the hardware
+   bus is NOT the ALS (it ACKs but ignores register commands).
 4. **uBlox must be crossed-wired** (TX→PA10, RX→PA9). Without an antenna it
    still sends `$GPTXT` boot messages + 1 Hz NMEA with empty fix (time fills in
    as soon as any satellite is heard). Indoors you may see `sats=0` forever.

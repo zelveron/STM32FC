@@ -91,128 +91,167 @@ static bool bmp5_begin(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* ALS31300 3-axis Hall-effect sensor (I2C1 @0x60)                           */
+/* ALS31300 3-axis Hall-effect sensor (software I2C on PB8=SCL, PB9=SDA)      */
 /* ------------------------------------------------------------------------- */
 
-#define ALS_ADDR 0x7E   /* found by I2C scan (126 decimal) */
+#define ALS_SCL   PB8
+#define ALS_SDA   PB9
+#define ALS_ADDR  0x60   /* ALS31300 default (ADR0=ADR1=GND) = 96 decimal, datasheet Table 19 */
 
-static void als_write(uint8_t reg, const uint8_t *buf, uint8_t len)
+/* PB8/PB9 are I2C1's *alternate* pins and I2C1 is already used by the BMP581
+   on PB6/PB7, so the ALS is driven with a small software (bit-bang) I2C master. */
+
+static void als_sda_out(bool high)
 {
-    Wire.beginTransmission(ALS_ADDR);
-    Wire.write(reg);
-    for (uint8_t i = 0; i < len; i++) Wire.write(buf[i]);
-    Wire.endTransmission();
+    pinMode(ALS_SDA, OUTPUT);
+    digitalWrite(ALS_SDA, high ? HIGH : LOW);
 }
 
-static int  als_read_fail_stage = 0;   /* 0=ok, 1=write NACK, 2=short read */
-static int  als_read_got = 0;          /* bytes received on short read */
+static void als_sda_in(void)
+{
+    pinMode(ALS_SDA, INPUT_PULLUP);
+}
+
+static void als_i2c_start(void)
+{
+    als_sda_out(true);
+    digitalWrite(ALS_SCL, HIGH);
+    delayMicroseconds(5);
+    als_sda_out(false);            /* SDA falls while SCL high = START */
+    delayMicroseconds(5);
+    digitalWrite(ALS_SCL, LOW);
+}
+
+static void als_i2c_stop(void)
+{
+    als_sda_out(false);
+    digitalWrite(ALS_SCL, HIGH);
+    delayMicroseconds(5);
+    als_sda_out(true);             /* SDA rises while SCL high = STOP */
+    delayMicroseconds(5);
+}
+
+/* Write 8 bits MSB-first, then clock the ACK bit. Returns true on ACK. */
+static bool als_i2c_write(uint8_t b)
+{
+    for (int i = 7; i >= 0; i--)
+    {
+        als_sda_out((b >> i) & 1);
+        digitalWrite(ALS_SCL, HIGH);
+        delayMicroseconds(5);
+        digitalWrite(ALS_SCL, LOW);
+        delayMicroseconds(5);
+    }
+    als_sda_in();                  /* release SDA so the slave can ACK */
+    digitalWrite(ALS_SCL, HIGH);
+    delayMicroseconds(5);
+    bool ack = (digitalRead(ALS_SDA) == LOW);
+    digitalWrite(ALS_SCL, LOW);
+    delayMicroseconds(5);
+    als_sda_out(true);
+    return ack;
+}
+
+/* Read 8 bits MSB-first; ack=true sends ACK (all but the last byte). */
+static uint8_t als_i2c_read(bool ack)
+{
+    uint8_t b = 0;
+    als_sda_in();
+    for (int i = 7; i >= 0; i--)
+    {
+        digitalWrite(ALS_SCL, HIGH);
+        delayMicroseconds(5);
+        if (digitalRead(ALS_SDA)) b |= (1 << i);
+        digitalWrite(ALS_SCL, LOW);
+        delayMicroseconds(5);
+    }
+    als_sda_out(!ack);             /* ACK = SDA low, NACK = SDA high */
+    digitalWrite(ALS_SCL, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(ALS_SCL, LOW);
+    delayMicroseconds(5);
+    als_sda_out(true);
+    return b;
+}
+
+static int  als_read_fail_stage = 0;   /* 0=ok, 1=address/reg NACK */
 
 static bool als_read(uint8_t reg, uint8_t *buf, uint8_t len)
 {
-    Wire.beginTransmission(ALS_ADDR);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) { als_read_fail_stage = 1; return false; }
-    int n = Wire.requestFrom((uint8_t)ALS_ADDR, len);
-    if (n != len) { als_read_fail_stage = 2; als_read_got = n; return false; }
-    for (uint8_t i = 0; i < len; i++) buf[i] = Wire.read();
+    als_i2c_start();
+    if (!als_i2c_write((ALS_ADDR << 1) | 0)) { als_i2c_stop(); als_read_fail_stage = 1; return false; }
+    if (!als_i2c_write(reg))                 { als_i2c_stop(); als_read_fail_stage = 1; return false; }
+    als_i2c_start();                         /* repeated START */
+    if (!als_i2c_write((ALS_ADDR << 1) | 1)) { als_i2c_stop(); als_read_fail_stage = 1; return false; }
+    for (uint8_t i = 0; i < len; i++) buf[i] = als_i2c_read(i < len - 1);
+    als_i2c_stop();
     als_read_fail_stage = 0;
     return true;
 }
 
-/* One-time diagnostic: verify wake write + reads after als_begin(). */
+static void als_write(uint8_t reg, const uint8_t *buf, uint8_t len)
+{
+    als_i2c_start();
+    if (!als_i2c_write((ALS_ADDR << 1) | 0)) { als_i2c_stop(); return; }
+    if (!als_i2c_write(reg))                 { als_i2c_stop(); return; }
+    for (uint8_t i = 0; i < len; i++)
+        if (!als_i2c_write(buf[i]))          { als_i2c_stop(); return; }
+    als_i2c_stop();
+}
+
+/* One-time diagnostic: ACK check + 8-byte data read over software I2C. */
 static void als_debug_probe(void)
 {
     uint8_t b[8];
-    uint8_t v[4] = { 0x00, 0x00, 0x00, 0x00 };
-    uint8_t cac_msb[4] = { 0x2C, 0x41, 0x35, 0x34 };
-    uint8_t cac_lsb[4] = { 0x34, 0x35, 0x41, 0x2C };
-    int r;
 
-    /* Test 1: CAC unlock, MSB first, to 0x35. */
-    Wire.beginTransmission(ALS_ADDR); Wire.write(0x35);
-    for (int i = 0; i < 4; i++) Wire.write(cac_msb[i]);
-    r = Wire.endTransmission();
-    SerialUSB.print(F("ALS_PRB_CAC_MSB,")); SerialUSB.println(r);
+    als_i2c_start();
+    bool ack = als_i2c_write((ALS_ADDR << 1) | 0);
+    als_i2c_stop();
 
-    /* Test 2: CAC unlock, LSB first, to 0x35. */
-    Wire.beginTransmission(ALS_ADDR); Wire.write(0x35);
-    for (int i = 0; i < 4; i++) Wire.write(cac_lsb[i]);
-    r = Wire.endTransmission();
-    SerialUSB.print(F("ALS_PRB_CAC_LSB,")); SerialUSB.println(r);
+    SerialUSB.print(F("ALS_PRB,"));
+    SerialUSB.print(ALS_ADDR, HEX);
+    SerialUSB.print(F(",ack="));
+    SerialUSB.print(ack ? 1 : 0);
+    SerialUSB.print(F(",n="));
 
-    /* Test 3: write op mode 0x27 (active). */
-    Wire.beginTransmission(ALS_ADDR); Wire.write(0x27);
-    for (int i = 0; i < 4; i++) Wire.write(v[i]);
-    r = Wire.endTransmission();
-    SerialUSB.print(F("ALS_PRB_WAKE,")); SerialUSB.println(r);
-    delayMicroseconds(600);
-
-    /* Test 4: read op mode 0x27 (4 bytes). */
-    SerialUSB.print(F("ALS_PRB_R27_4,"));
-    if (als_read(0x27, b, 4))
+    if (ack && als_read(0x28, b, 8))
     {
-        for (int i = 0; i < 4; i++) { if (b[i] < 0x10) SerialUSB.print('0'); SerialUSB.print(b[i], HEX); if (i < 3) SerialUSB.print(','); }
-        SerialUSB.println();
+        SerialUSB.print(8);
+        SerialUSB.print(',');
+        for (int i = 0; i < 8; i++)
+        {
+            if (b[i] < 0x10) SerialUSB.print('0');
+            SerialUSB.print(b[i], HEX);
+        }
     }
     else
     {
-        SerialUSB.print(F("FAIL,")); SerialUSB.print(als_read_fail_stage); SerialUSB.print(','); SerialUSB.println(als_read_got);
+        SerialUSB.print(0);
     }
-
-    /* Test 5: read data 0x28 (8 bytes). */
-    SerialUSB.print(F("ALS_PRB_R28_8,"));
-    if (als_read(0x28, b, 8))
-    {
-        for (int i = 0; i < 8; i++) { if (b[i] < 0x10) SerialUSB.print('0'); SerialUSB.print(b[i], HEX); if (i < 7) SerialUSB.print(','); }
-        SerialUSB.println();
-    }
-    else
-    {
-        SerialUSB.print(F("FAIL,")); SerialUSB.print(als_read_fail_stage); SerialUSB.print(','); SerialUSB.println(als_read_got);
-    }
-
-    /* --- Retry at a slow I2C clock (marginal-solder diagnosis) ---------- */
-    Wire.setClock(10000);
-
-    Wire.beginTransmission(ALS_ADDR); Wire.write(0x27);
-    for (int i = 0; i < 4; i++) Wire.write(v[i]);
-    r = Wire.endTransmission();
-    SerialUSB.print(F("ALS_PRB_10K_WAKE,")); SerialUSB.println(r);
-    delayMicroseconds(600);
-
-    SerialUSB.print(F("ALS_PRB_10K_R28_8,"));
-    if (als_read(0x28, b, 8))
-    {
-        for (int i = 0; i < 8; i++) { if (b[i] < 0x10) SerialUSB.print('0'); SerialUSB.print(b[i], HEX); if (i < 7) SerialUSB.print(','); }
-        SerialUSB.println();
-    }
-    else
-    {
-        SerialUSB.print(F("FAIL,")); SerialUSB.print(als_read_fail_stage); SerialUSB.print(','); SerialUSB.println(als_read_got);
-    }
-
-    Wire.setClock(100000);
+    SerialUSB.println();
 }
 
 static bool als_present = false;
 
 static void als_begin(void)
 {
-    /* Quick ACK check: is the ALS31300 on the bus? */
-    Wire.beginTransmission(ALS_ADDR);
-    als_present = (Wire.endTransmission() == 0);
+    pinMode(ALS_SCL, OUTPUT);
+    digitalWrite(ALS_SCL, LOW);
+    als_sda_out(true);
+
+    /* ACK check at 0x60 over software I2C. */
+    als_i2c_start();
+    als_present = als_i2c_write((ALS_ADDR << 1) | 0);
+    als_i2c_stop();
     if (!als_present) return;
 
-    /* Unlock customer access (CAC 0x2C413534, MSB first) at register 0x35. */
-    static const uint8_t cac[4] = { 0x2C, 0x41, 0x35, 0x34 };
-    als_write(0x35, cac, 4);
-
-    /* Wake from sleep: operating-mode register 0x27 is a 32-bit register.
-       bits[1:0] = 0 -> active mode. Write all 4 bytes (MSB first). */
+    /* Wake from sleep: register 0x27 bits[1:0] = 0 -> Active Mode.
+       Per datasheet, "sleep" is the one register writable WITHOUT entering
+       Customer Access mode, so no CAC unlock is needed. */
     uint8_t v[4] = { 0x00, 0x00, 0x00, 0x00 };
     als_write(0x27, v, 4);
 
-    /* Exit-sleep time == power-on delay time (600 us per datasheet). */
+    /* Exit-sleep time == power-on delay time. */
     delayMicroseconds(600);
 }
 
@@ -222,9 +261,9 @@ static bool als_get(int16_t *x, int16_t *y, int16_t *z, int16_t *t, uint8_t *raw
     if (!als_read(0x28, b, 8)) return false;
     if (raw) for (int i = 0; i < 8; i++) raw[i] = b[i];
 
-    int16_t rx = (int16_t)(((uint16_t)b[0] << 4) | (b[4] & 0x0F));
+    int16_t rx = (int16_t)(((uint16_t)b[0] << 4) | (b[5] & 0x0F));
     if (rx & 0x0800) rx |= (int16_t)0xF000;
-    int16_t ry = (int16_t)(((uint16_t)b[1] << 4) | (b[5] & 0x0F));
+    int16_t ry = (int16_t)(((uint16_t)b[1] << 4) | ((b[6] >> 4) & 0x0F));
     if (ry & 0x0800) ry |= (int16_t)0xF000;
     int16_t rz = (int16_t)(((uint16_t)b[2] << 4) | (b[6] & 0x0F));
     if (rz & 0x0800) rz |= (int16_t)0xF000;

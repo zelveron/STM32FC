@@ -88,6 +88,16 @@ class MonitorApp:
         self._row(bmi_frame, "Accel", self.acc_var)
         self._row(bmi_frame, "Gyro", self.gyr_var)
 
+        # --- ALS section ---
+        als_frame = ttk.LabelFrame(root, text="ALS31300 (Hall)")
+        als_frame.pack(fill="x", padx=16, pady=6)
+
+        self.als_var = tk.StringVar(value="--, --, --")
+        self.als_temp_var = tk.StringVar(value="-- °C")
+
+        self._row(als_frame, "Field X,Y,Z", self.als_var)
+        self._row(als_frame, "Temp", self.als_temp_var)
+
         # --- GPS section ---
         gps_frame = ttk.LabelFrame(root, text="uBlox GNSS (NMEA)")
         gps_frame.pack(fill="x", padx=16, pady=6)
@@ -250,6 +260,15 @@ class MonitorApp:
                 return
             self.acc_var.set(f"{vals[0]:+.4f}, {vals[1]:+.4f}, {vals[2]:+.4f} g")
             self.gyr_var.set(f"{vals[3]:+7.2f}, {vals[4]:+7.2f}, {vals[5]:+7.2f} dps")
+
+        elif tag == "ALS" and len(parts) == 5:
+            try:
+                x = int(parts[1]); y = int(parts[2]); z = int(parts[3])
+                t = float(parts[4])
+            except ValueError:
+                return
+            self.als_var.set(f"{x:+d}, {y:+d}, {z:+d}")
+            self.als_temp_var.set(f"{t:.1f} °C")
 
         elif tag == "ATT" and len(parts) == 4:
             try:
