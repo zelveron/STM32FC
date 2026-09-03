@@ -421,6 +421,10 @@ static bool     gps_locked     = false;
 static bool     gps_nmea_valid = false;
 static uint8_t  gps_first[160];
 static uint16_t gps_first_len  = 0;
+static int   gps_sats      = 0;
+static int   gps_fix       = 0;
+static char  gps_time_str[12] = "";
+static float gps_speed_kmh = 0.0f;
 
 /* --- UBX (u-blox binary) helpers for active probing ---------------------- */
 
@@ -550,6 +554,43 @@ static bool gps_valid_nmea(const char *line)
     return cs == cs_hex;
 }
 
+/* Convert NMEA time "HHMMSS.ss" into "HH:MM:SS". */
+static void gps_store_time(const char *nmea_time)
+{
+    if (nmea_time[0] == '\0' || strlen(nmea_time) < 6) return;
+    gps_time_str[0] = nmea_time[0];
+    gps_time_str[1] = nmea_time[1];
+    gps_time_str[2] = ':';
+    gps_time_str[3] = nmea_time[2];
+    gps_time_str[4] = nmea_time[3];
+    gps_time_str[5] = ':';
+    gps_time_str[6] = nmea_time[4];
+    gps_time_str[7] = nmea_time[5];
+    gps_time_str[8] = '\0';
+}
+
+/* Parse $GxRMC: UTC time + speed over ground (knots -> km/h). */
+static bool gps_process_rmc(char *line)
+{
+    int len = (int)strlen(line);
+    if (line[0] != '$' || line[3] != 'R' || line[4] != 'M' || line[5] != 'C')
+        return false;
+    if (len < 10 || line[len - 3] != '*') return false;
+    uint8_t cs = 0;
+    for (int i = 1; i < len - 3; i++) cs ^= (uint8_t)line[i];
+    uint8_t cs_hex = (uint8_t)strtol(line + len - 2, NULL, 16);
+    if (cs != cs_hex) return false;
+
+    line[len - 3] = '\0';
+    char *f[13];
+    int n = gps_split(line, f, 13);
+    if (n < 8) return false;
+
+    gps_store_time(f[1]);
+    if (f[7][0] != '\0') gps_speed_kmh = atof(f[7]) * 1.852f;  /* knots -> km/h */
+    return true;
+}
+
 static bool gps_process_line(char *line)
 {
     int len = (int)strlen(line);
@@ -572,6 +613,29 @@ static bool gps_process_line(char *line)
 
     /* Need fields through altitude unit (index 10). */
     if (n < 11) return false;
+
+    int sats = atoi(f[7]);
+    int fix  = atoi(f[6]);
+    gps_sats = sats;
+    gps_fix  = fix;
+    gps_store_time(f[1]);
+
+    /* Report fix quality + satellite count once per second, even with no
+       position (lets us watch satellite acquisition). */
+    static uint32_t last_gps_stat = 0;
+    if ((millis() - last_gps_stat) >= 1000)
+    {
+        last_gps_stat = millis();
+        SerialUSB.print(F("GPS_STAT,"));
+        SerialUSB.print(fix);
+        SerialUSB.print(',');
+        SerialUSB.print(sats);
+        SerialUSB.print(',');
+        SerialUSB.print(gps_time_str);
+        SerialUSB.print(',');
+        SerialUSB.println(gps_speed_kmh, 1);
+    }
+
     if (f[2][0] == '\0' || f[4][0] == '\0') return false;
 
     float lat_raw = atof(f[2]);
@@ -583,8 +647,6 @@ static bool gps_process_line(char *line)
     if (f[5][0] == 'W') lon = -lon;
 
     float gps_alt = atof(f[9]);
-    int sats = atoi(f[7]);
-    int fix  = atoi(f[6]);
 
     SerialUSB.print(F("GPS,"));
     SerialUSB.print(lat, 6);
@@ -595,7 +657,11 @@ static bool gps_process_line(char *line)
     SerialUSB.print(',');
     SerialUSB.print(sats);
     SerialUSB.print(',');
-    SerialUSB.println(fix);
+    SerialUSB.print(fix);
+    SerialUSB.print(',');
+    SerialUSB.print(gps_time_str);
+    SerialUSB.print(',');
+    SerialUSB.println(gps_speed_kmh, 1);
     return true;
 }
 
@@ -662,7 +728,7 @@ void setup(void)
         sd_file = SD.open(sd_log_name, FILE_WRITE);
         if (sd_file)
         {
-            sd_file.println(F("t_ms,ax,ay,az,gx,gy,gz,roll,pitch,yaw,press_hPa,temp_c,alt_m"));
+            sd_file.println(F("t_ms,ax,ay,az,gx,gy,gz,roll,pitch,yaw,press_hPa,temp_c,alt_m,gps_time,gps_sats,gps_speed_kmh"));
             sd_file.flush();
             SerialUSB.print(F("SD_STATUS,1,"));
             SerialUSB.println(sd_log_name);
@@ -697,6 +763,7 @@ void loop(void)
                 gps_last_nmea[sizeof(gps_last_nmea) - 1] = '\0';
             }
             if (gps_process_line(gps_line)) gps_locked = true;
+            gps_process_rmc(gps_line);
             gps_len = 0;
         }
         else if (c != '\r' && gps_len < (sizeof(gps_line) - 1))
@@ -957,7 +1024,10 @@ void loop(void)
         sd_file.print(att_yaw, 1); sd_file.print(',');
         sd_file.print(g_press, 3); sd_file.print(',');
         sd_file.print(g_temp, 2); sd_file.print(',');
-        sd_file.println(g_alt, 2);
+        sd_file.print(g_alt, 2); sd_file.print(',');
+        sd_file.print(gps_time_str); sd_file.print(',');
+        sd_file.print(gps_sats); sd_file.print(',');
+        sd_file.println(gps_speed_kmh, 1);
 
         static uint32_t last_sd_sync = 0;
         if ((millis() - last_sd_sync) >= 1000)

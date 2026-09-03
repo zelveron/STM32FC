@@ -96,11 +96,15 @@ class MonitorApp:
         self.gps_alt_var = tk.StringVar(value="-- m")
         self.sats_var = tk.StringVar(value="--")
         self.fix_var = tk.StringVar(value="--")
+        self.gps_time_var = tk.StringVar(value="--")
+        self.gps_speed_var = tk.StringVar(value="--")
 
         self._row(gps_frame, "Position", self.pos_var)
         self._row(gps_frame, "GPS Altitude", self.gps_alt_var)
         self._row(gps_frame, "Satellites", self.sats_var)
         self._row(gps_frame, "Fix", self.fix_var)
+        self._row(gps_frame, "Time (UTC)", self.gps_time_var)
+        self._row(gps_frame, "Speed", self.gps_speed_var)
 
         # --- Attitude section ---
         att_frame = ttk.LabelFrame(root, text="Attitude (complementary filter)")
@@ -259,19 +263,36 @@ class MonitorApp:
             self.yaw_var.set(f"{self._yaw_deg:+.1f} °")
             self._draw_horizon()
 
-        elif tag == "GPS" and len(parts) == 6:
+        elif tag == "GPS" and len(parts) == 8:
             try:
                 lat = float(parts[1])
                 lon = float(parts[2])
                 alt = float(parts[3])
                 sats = int(parts[4])
                 fix = int(parts[5])
+                t = parts[6]
+                spd = float(parts[7])
             except ValueError:
                 return
             self.pos_var.set(f"{lat:.6f}, {lon:.6f}")
             self.gps_alt_var.set(f"{alt:.1f} m")
             self.sats_var.set(str(sats))
             self.fix_var.set(self._fix_label(fix))
+            self.gps_time_var.set(t)
+            self.gps_speed_var.set(f"{spd:.1f} km/h")
+
+        elif tag == "GPS_STAT" and len(parts) == 5:
+            try:
+                fix = int(parts[1])
+                sats = int(parts[2])
+                t = parts[3]
+                spd = float(parts[4])
+            except ValueError:
+                return
+            self.sats_var.set(str(sats))
+            self.fix_var.set(self._fix_label(fix))
+            self.gps_time_var.set(t)
+            self.gps_speed_var.set(f"{spd:.1f} km/h")
 
         elif tag == "BMI_STATUS" and len(parts) == 2:
             self._connected = (parts[1] == "1")
